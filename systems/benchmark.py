@@ -115,6 +115,11 @@ def run_single_step(
 def benchmark_model(config: BenchmarkConfig) -> dict[str, float]:
     """Run warmup steps followed by timed measurement steps."""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Start tracing before model construction so model-weight allocations have
+    # stack frames and don't appear as ghost blocks in pytorch.org/memory_viz.
+    maybe_start_memory_history(config.use_memory_profiler)
+
     model = build_model(config)
     model.train()
 
@@ -133,9 +138,6 @@ def benchmark_model(config: BenchmarkConfig) -> dict[str, float]:
     times: list[float] = []
     for step in range(config.warmup_steps + config.measure_steps):
         is_warmup = step < config.warmup_steps
-
-        if step == config.warmup_steps:
-            maybe_start_memory_history(config.use_memory_profiler)
 
         torch.cuda.nvtx.range_push("warmup" if is_warmup else "measurement")
         t0 = timeit.default_timer()
