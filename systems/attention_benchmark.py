@@ -49,12 +49,19 @@ def make_qkv(batch_size: int, sequence_length: int, head_dim: int, device: torch
 
 def benchmark_attention_once(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> dict[str, float]:
     """Time the forward and backward pass for a single attention configuration."""
-    # Warmup: full forward+backward to JIT-compile kernels and fill caches.
+    # Warmup: backward pass first so torch.compile specialises the grad graph.
     for _ in range(_WARMUP_STEPS):
         out = _attn_fn(q, k, v)
         out.sum().backward()
         torch.cuda.synchronize()
         q.grad = k.grad = v.grad = None
+
+    # Also warmup the no-grad path — torch.compile treats it as a separate call-site
+    # and will recompile on the first timed iteration if we skip this.
+    for _ in range(_WARMUP_STEPS):
+        with torch.no_grad():
+            _attn_fn(q, k, v)
+        torch.cuda.synchronize()
 
     # Time forward passes with no_grad (measures compute only, not graph construction).
     fwd_times: list[float] = []
