@@ -201,7 +201,9 @@ _basics_model.scaled_dot_product_attention = annotated_scaled_dot_product_attent
 
 def maybe_start_memory_history(enabled: bool) -> None:
     if enabled:
-        torch.cuda.memory._record_memory_history(max_entries=100_000)
+        # stacks='all' captures C++ frames so backward-pass gradient allocations
+        # don't appear as ghost blocks in pytorch.org/memory_viz.
+        torch.cuda.memory._record_memory_history(max_entries=100_000, stacks="all")
 
 
 def maybe_dump_memory_snapshot(enabled: bool, output_path: Path) -> None:
