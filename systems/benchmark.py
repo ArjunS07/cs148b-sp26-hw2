@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import statistics
 import timeit
 from contextlib import nullcontext
@@ -9,8 +10,11 @@ from pathlib import Path
 from typing import Literal
 
 import torch
+from einops import einsum
 
+import basics.model as _basics_model
 from basics.model import BasicsTransformerLM
+from basics.nn_utils import softmax as _softmax
 
 
 @dataclass(frozen=True)
@@ -124,14 +128,21 @@ def benchmark_model(config: BenchmarkConfig) -> dict[str, float]:
     if config.mode == "train-step":
         optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
 
-    maybe_start_memory_history(config.use_memory_profiler)
+    torch.cuda.reset_peak_memory_stats(device)
 
     times: list[float] = []
     for step in range(config.warmup_steps + config.measure_steps):
+        is_warmup = step < config.warmup_steps
+
+        if step == config.warmup_steps:
+            maybe_start_memory_history(config.use_memory_profiler)
+
+        torch.cuda.nvtx.range_push("warmup" if is_warmup else "measurement")
         t0 = timeit.default_timer()
         run_single_step(model, batch, config.mode, autocast_ctx, optimizer)
         t1 = timeit.default_timer()
-        if step >= config.warmup_steps:
+        torch.cuda.nvtx.range_pop()
+        if not is_warmup:
             times.append(t1 - t0)
 
     maybe_dump_memory_snapshot(
@@ -139,6 +150,7 @@ def benchmark_model(config: BenchmarkConfig) -> dict[str, float]:
         config.output_dir / "memory_snapshot.pickle",
     )
 
+    peak_memory_mb = torch.cuda.max_memory_allocated(device) / (1024 ** 2)
     mean_s = statistics.mean(times)
     std_s = statistics.stdev(times) if len(times) > 1 else 0.0
     results = {
@@ -146,17 +158,43 @@ def benchmark_model(config: BenchmarkConfig) -> dict[str, float]:
         "std_s": std_s,
         "mean_ms": mean_s * 1000,
         "std_ms": std_s * 1000,
+        "peak_memory_mb": peak_memory_mb,
     }
     print(
         f"[{config.model_size:6s} | {config.mode:16s}] "
         f"mean={mean_s*1000:7.2f} ms  std={std_s*1000:6.2f} ms"
+        f"  peak_mem={peak_memory_mb:8.1f} MB"
     )
     return results
 
 
-def annotated_scaled_dot_product_attention(*args, **kwargs):
-    """Optional NVTX-annotated attention path for Nsight Systems profiling."""
-    raise NotImplementedError
+def annotated_scaled_dot_product_attention(Q, K, V, mask=None):
+    """Drop-in replacement for scaled_dot_product_attention with NVTX range annotations."""
+    nvtx = torch.cuda.nvtx
+    nvtx.range_push("scaled dot product attention")
+
+    nvtx.range_push("computing attention scores")
+    d_k = K.shape[-1]
+    scores = einsum(Q, K, "... query d_k, ... key d_k -> ... query key") / math.sqrt(d_k)
+    if mask is not None:
+        scores = torch.where(mask, scores, float("-inf"))
+    nvtx.range_pop()
+
+    nvtx.range_push("computing softmax")
+    weights = _softmax(scores, dim=-1)
+    nvtx.range_pop()
+
+    nvtx.range_push("final matmul")
+    out = einsum(weights, V, "... query key, ... key d_v -> ... query d_v")
+    nvtx.range_pop()
+
+    nvtx.range_pop()  # scaled dot product attention
+    return out
+
+
+# Patch at import time so every invocation — including nsys subprocesses — uses the
+# annotated version. NVTX calls are no-ops when not running under nsys.
+_basics_model.scaled_dot_product_attention = annotated_scaled_dot_product_attention
 
 
 def maybe_start_memory_history(enabled: bool) -> None:
