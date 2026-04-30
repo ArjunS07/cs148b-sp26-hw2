@@ -52,10 +52,12 @@ def get_response_log_probs(
     model: torch.nn.Module,
     input_ids: Tensor,
     labels: Tensor,
+    attention_mask: Tensor | None = None,
     return_token_entropy: bool = False,
 ) -> dict[str, Tensor]:
     """Score conditional log-probabilities for a batch of prompt/response examples."""
-    logits = model(input_ids).logits
+    kwargs = {} if attention_mask is None else {"attention_mask": attention_mask}
+    logits = model(input_ids, **kwargs).logits
     log_probs = F.log_softmax(logits, dim=-1)
     token_log_probs = log_probs.gather(-1, labels.unsqueeze(-1)).squeeze(-1)
     out: dict[str, Tensor] = {"log_probs": token_log_probs}
@@ -262,12 +264,16 @@ def train_grpo(
         input_ids_all = all_tokenized["input_ids"].to(device)
         labels_all = all_tokenized["labels"].to(device)
         response_mask_all = all_tokenized["response_mask"].to(device)
+        # Explicit attention mask so the model can distinguish padding from EOS
+        # (needed when pad_token_id == eos_token_id, e.g. Qwen models)
+        attention_mask_all = (input_ids_all != tokenizer.pad_token_id).long()
 
         with torch.no_grad():
             old_lp_out = get_response_log_probs(
                 model=model,
                 input_ids=input_ids_all,
                 labels=labels_all,
+                attention_mask=attention_mask_all,
                 return_token_entropy=False,
             )
         old_log_probs_all = old_lp_out["log_probs"].detach()
@@ -285,11 +291,13 @@ def train_grpo(
                 mb_mask = response_mask_all[mb_idx]
                 mb_advantages = advantages[mb_idx].unsqueeze(1).to(device)
                 mb_old_log_probs = old_log_probs_all[mb_idx]
+                mb_attention_mask = attention_mask_all[mb_idx]
 
                 lp_out = get_response_log_probs(
                     model=model,
                     input_ids=mb_input_ids,
                     labels=mb_labels,
+                    attention_mask=mb_attention_mask,
                     return_token_entropy=False,
                 )
                 mb_policy_log_probs = lp_out["log_probs"]
