@@ -161,7 +161,7 @@ def run_self_consistency_baseline(output_path: Path, k: int = 5) -> None:
     for i in range(len(examples)):
         group = all_responses[i * k: (i + 1) * k]
         grouped_responses.append(group)
-        voted_responses.append(majority_vote_tagged_answers(group))
+        voted_responses.append(majority_vote_tagged_answers(group) or "")
 
     reward_infos = [
         answer_tag_reward_fn(resp, gt)
