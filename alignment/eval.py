@@ -16,7 +16,10 @@ def load_gsm8k_examples(split: str) -> list[dict[str, Any]]:
     """Load GSM8K examples from HuggingFace datasets."""
     from datasets import load_dataset
     ds = load_dataset("openai/gsm8k", "main", split=split)
-    return [{"question": ex["question"], "answer": ex["answer"]} for ex in ds]
+    return [
+        {"question": ex["question"], "answer": ex["answer"].split("####")[-1].strip()}
+        for ex in ds
+    ]
 
 
 def build_prompts(examples: Sequence[dict[str, Any]], prompt_template: str) -> list[str]:
